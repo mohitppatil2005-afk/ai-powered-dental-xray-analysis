@@ -1,0 +1,25 @@
+
+# Python environments
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Secrets
+.env
+.env.*
+
+# IDE settings
+.vscode/
+
+# Model weights and datasets
+*.keras
+*.h5
+*.pt
+*.pth
+*.onnx
+data/
+datasets/
