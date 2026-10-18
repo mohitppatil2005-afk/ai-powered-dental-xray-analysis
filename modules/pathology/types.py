@@ -7,6 +7,7 @@ Data models and enumeration types for dental pathology analysis.
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional, Tuple
+import numpy as np
 
 
 class PathologyStatus(str, Enum):
@@ -27,6 +28,7 @@ class PathologyFinding:
     associated_tooth: Optional[str] = None           # E.g. "16", "38"
     description: str = ""
     status: PathologyStatus = PathologyStatus.DETECTED
+    mask: Optional[np.ndarray] = None               # (H, W) bone probability map
 
 
 @dataclass

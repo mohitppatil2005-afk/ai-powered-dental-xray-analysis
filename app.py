@@ -28,6 +28,7 @@ from modules.segmentation.yolo_adapter import (
     yolo_weights_info,
 )
 from modules.pathology.registry import evaluate_all_pathologies
+from modules.pathology.bone_loss_adapter import find_periodontal_bone_loss
 from modules.pathology.yolo_detector import (
     download_pathology_weights,
     pathology_model_available,
@@ -91,6 +92,7 @@ for warn_msg in val_result.warnings:
     st.warning(f"⚠️ {warn_msg}")
 
 original_rgb = val_result.rgb_array
+original_gray = val_result.grayscale_array
 grayscale_array = val_result.grayscale_array
 original_pil = val_result.original_pil
 
@@ -396,6 +398,16 @@ st.subheader("4. Dental pathology detection")
 
 pathology_results = evaluate_all_pathologies(original_rgb)
 
+# Evaluate periodontal bone loss separately, using the dedicated adapter so
+# that its output semantics (conf + mask + bbox) are kept distinct from the
+# YOLO conditions. The adapter is intentionally the ONLY source of PBL output;
+# the YOLO detector never fabricates a PBL signal.
+_pbl_result = find_periodontal_bone_loss(original_gray)
+if _pbl_result.is_evaluated:
+    pathology_results["periodontal_bone_loss"] = _pbl_result
+else:
+    pathology_results["periodontal_bone_loss"] = _pbl_result
+
 patho_col1, patho_col2 = st.columns(2)
 items = list(pathology_results.items())
 
@@ -407,6 +419,13 @@ for i, (code, res) in enumerate(items):
             st.warning(f"Status: {res.status_display}")
             st.write(res.status_explanation)
             st.caption(f"**Limitation:** {res.validation_limitation}")
+
+
+st.caption(
+    "Screening aids only — absence of a detection does NOT rule out disease. "
+    "Each card above reports this image's outcome; general model notes inside a "
+    "card describe the upstream model, not this image."
+)
 
 
 # ── 5. Download Clinical Report ────────────────────────────────────────────────

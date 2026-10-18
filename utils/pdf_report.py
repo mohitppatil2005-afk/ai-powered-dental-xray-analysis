@@ -391,6 +391,16 @@ def generate_dental_pdf_report(
                     if res.is_evaluated and res.findings
                     else ("None detected" if res.is_evaluated else "Not Evaluated")
                 )
+                # PBL is a whole-image screening signal, not a tooth-specific
+                # finding. Show the mask/box metadata only in a compact form
+                # and never invent an FDI tooth.
+                if code == "periodontal_bone_loss" and res.is_evaluated and res.findings:
+                    findings_str = (
+                        f"mask={res.findings[0].mask.shape[0]}x{res.findings[0].mask.shape[1]} "
+                        f"pbl_pct={res.findings[0].mask.mean() * 100:.1f}%"
+                        if res.findings[0].mask is not None
+                        else "screening flag"
+                    )
                 patho_rows.append([
                     Paragraph(f"<b>{res.condition_name}</b>", table_cell),
                     Paragraph(f"<font color='{status_color}'><b>{res.status_display}</b></font>", table_cell),

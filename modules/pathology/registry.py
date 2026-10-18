@@ -29,7 +29,8 @@ TARGET_PATHOLOGIES = {
         "description": "Evaluation of alveolar bone crest resorption and bone support reduction.",
         "validation_limitation": (
             "Requires CEJ-to-alveolar crest ground-truth measurements or bitewing radiographs. "
-            "No validated local model is configured."
+            "Screening-level determination only; not a substitute for clinical measurement. "
+            "Requires professional review."
         ),
     },
     "periapical_lesion": {

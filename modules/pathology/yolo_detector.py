@@ -62,18 +62,23 @@ CONDITION_TO_DISPLAY_NAME: Dict[str, str] = {
 }
 
 # Upstream-reported limitations per condition (from the model card's own notes).
+# These describe the upstream model card in general terms; they must never
+# state numeric findings about the current image. Per-image numbers (counts,
+# top confidence) are composed separately in the detector below.
 _UPSTREAM_NOTES: Dict[str, str] = {
     "dental_caries": (
-        "Upstream notes caries recall is limited at panoramic resolution; "
-        "treat as a screening hint, not a count."
+        "Upstream note (not this image): caries recall is reported as limited "
+        "at panoramic resolution; treat any flag as a screening hint, not a count."
     ),
     "periapical_lesion": (
-        "Upstream notes periapical lesion detection is limited by a small "
-        "validation set; treat as a flag to look closer, not a diagnosis."
+        "Upstream note (not this image): periapical-lesion detection is reported "
+        "as limited by a small validation set; treat any flag as a prompt to "
+        "look closer, not a diagnosis."
     ),
     "impacted_teeth": (
-        "Upstream reports impacted_tooth as the highest-quality class with "
-        "confidences 0.66-0.84."
+        "Upstream note (not this image): the model card describes "
+        "impacted_tooth as its strongest class; treat any flag as a screening "
+        "hint requiring professional review."
     ),
 }
 
@@ -327,16 +332,17 @@ def make_pathology_detector(condition_code: str) -> Callable:
             status = PathologyStatus.DETECTED
             status_display = f"Detected ({len(cond_findings)} finding(s))"
             explanation = (
-                f"{len(cond_findings)} region(s) flagged; highest confidence {top * 100:.0f}%. "
+                f"On this image, {len(cond_findings)} region(s) for this condition "
+                f"exceeded the screening threshold; highest confidence {top * 100:.0f}%. "
                 + _UPSTREAM_NOTES.get(condition_code, "")
             )
         else:
             status = PathologyStatus.NEGATIVE
             status_display = "Not Detected (screening negative)"
             explanation = (
-                "No region exceeded the screening confidence threshold. "
-                "This does NOT rule out the condition; a negative model output is not a clinical negative. "
-                + _UPSTREAM_NOTES.get(condition_code, "")
+                "On this image, no region for this condition exceeded the "
+                "screening confidence threshold. "
+                "This does NOT rule out the condition; a negative model output is not a clinical negative."
             )
 
         return ConditionEvaluationResult(

@@ -12,6 +12,8 @@ Tests for the public pretrained YOLO backend integration:
 import numpy as np
 import pytest
 
+from types import SimpleNamespace
+
 from modules.segmentation.config import (
     MODEL_CLASSES,
     RESTORATION_CLASSES,
@@ -28,6 +30,7 @@ from modules.segmentation.yolo_adapter import (
 )
 from modules.pathology import registry as pathology_registry
 from modules.pathology.registry import (
+    TARGET_PATHOLOGIES,
     evaluate_condition,
     get_registered_detector,
 )
@@ -260,6 +263,177 @@ def test_pathology_weights_info_reports_uncovered_bone_loss():
     info = pathology_weights_info()
     assert "periodontal_bone_loss" in info["uncovered_conditions"]
     assert "periodontal_bone_loss" not in info["covered_conditions"]
+
+
+# ---------------------------------------------------------------------------
+# Impacted-tooth class mapping / threshold / status regression tests
+# (fake YOLO outputs — no weights or network needed)
+# ---------------------------------------------------------------------------
+
+
+class _FakeTensor:
+    def __init__(self, value):
+        self._value = value
+
+    def item(self):
+        return self._value
+
+    def tolist(self):
+        return self._value
+
+
+class _FakeBoxes:
+    def __init__(self, rows):
+        """rows: list of (class_id, confidence, xyxy)."""
+        self._rows = rows
+
+    def __len__(self):
+        return len(self._rows)
+
+    def __iter__(self):
+        for cid, conf, xyxy in self._rows:
+            box = SimpleNamespace(
+                cls=_FakeTensor(cid),
+                conf=_FakeTensor(conf),
+                xyxy=[_FakeTensor(xyxy)],
+            )
+            yield box
+
+    # Vectorized tensor access, mirroring ultralytics Boxes.xyxy/.conf/.cls.
+    @property
+    def xyxy(self):
+        import torch
+
+        if not self._rows:
+            return torch.zeros((0, 4))
+        return torch.tensor([list(map(float, r[2])) for r in self._rows])
+
+    @property
+    def conf(self):
+        import torch
+
+        return torch.tensor([float(r[1]) for r in self._rows])
+
+    @property
+    def cls(self):
+        import torch
+
+        return torch.tensor([float(r[0]) for r in self._rows])
+
+
+class _FakeResult:
+    def __init__(self, rows, names):
+        self.boxes = _FakeBoxes(rows)
+        self.names = names
+
+
+class _FakeYolo:
+    def __init__(self, rows, names):
+        self._rows = rows
+        self.names = names
+        self.device = "cpu"
+
+    def predict(self, source=None, *args, **kwargs):
+        # Mirror the real YOLO runtime: server-side `conf` filtering happens
+        # before the adapter ever sees the boxes.
+        conf_min = float(kwargs.get("conf", 0.0))
+        kept = [r for r in self._rows if float(r[1]) >= conf_min]
+        return [_FakeResult(kept, self.names)]
+
+
+def test_pathology_class_map_matches_weights_manifest():
+    """Model class names must map to the exact registry condition codes."""
+    from modules.pathology.yolo_detector import PATHOLOGY_CLASS_TO_CONDITION
+    assert PATHOLOGY_CLASS_TO_CONDITION == {
+        "caries": "dental_caries",
+        "periapical_lesion": "periapical_lesion",
+        "impacted_tooth": "impacted_teeth",
+    }
+    for code in PATHOLOGY_CLASS_TO_CONDITION.values():
+        assert code in TARGET_PATHOLOGIES
+
+
+def test_impacted_tooth_detection_survives_threshold(
+    _isolate_pathology_registry, monkeypatch
+):
+    """High-confidence impacted_tooth (0.83/0.71) must stay DETECTED; the
+    sub-threshold 0.42 box must be dropped — threshold applied, not lowered."""
+    import modules.pathology.yolo_detector as yd
+    fake = _FakeYolo(
+        rows=[
+            (2, 0.8325, [10.0, 10.0, 50.0, 50.0]),
+            (2, 0.7055, [60.0, 60.0, 100.0, 100.0]),
+            (2, 0.4203, [110.0, 110.0, 150.0, 150.0]),
+            (0, 0.7376, [10.0, 60.0, 50.0, 100.0]),
+        ],
+        names={0: "caries", 1: "periapical_lesion", 2: "impacted_tooth"},
+    )
+    monkeypatch.setattr(yd, "load_pathology_model", lambda: fake)
+    pathology_registry._DETECTOR_REGISTRY.clear()
+    register_yolo_pathology_detectors()
+    img = np.zeros((64, 64, 3), dtype=np.uint8)
+    res = evaluate_condition("impacted_teeth", img)
+    assert res.status == PathologyStatus.DETECTED
+    assert res.condition_code == "impacted_teeth"
+    assert len(res.findings) == 2
+    assert all(f.condition_code == "impacted_teeth" for f in res.findings)
+    assert "83%" in res.status_explanation  # per-image top confidence
+    assert "0.66" not in res.status_explanation  # no static model-card numbers
+
+
+def test_sub_threshold_only_yields_honest_negative(
+    _isolate_pathology_registry, monkeypatch
+):
+    """When every box is below threshold, status is NEGATIVE (screening
+    negative) with no leftover findings and no static numeric claims."""
+    import modules.pathology.yolo_detector as yd
+    fake = _FakeYolo(
+        rows=[(2, 0.4203, [10.0, 10.0, 50.0, 50.0])],
+        names={0: "caries", 1: "periapical_lesion", 2: "impacted_tooth"},
+    )
+    monkeypatch.setattr(yd, "load_pathology_model", lambda: fake)
+    pathology_registry._DETECTOR_REGISTRY.clear()
+    register_yolo_pathology_detectors()
+    img = np.zeros((64, 64, 3), dtype=np.uint8)
+    res = evaluate_condition("impacted_teeth", img)
+    assert res.status == PathologyStatus.NEGATIVE
+    assert res.is_evaluated is True
+    assert res.findings == []
+    assert "this image" in res.status_explanation.lower()
+    assert "0.66" not in res.status_explanation
+
+
+def test_empty_prediction_yields_honest_negative(
+    _isolate_pathology_registry, monkeypatch
+):
+    """Zero model boxes -> NEGATIVE screening result, never DETECTED."""
+    import modules.pathology.yolo_detector as yd
+    fake = _FakeYolo(
+        rows=[],
+        names={0: "caries", 1: "periapical_lesion", 2: "impacted_tooth"},
+    )
+    monkeypatch.setattr(yd, "load_pathology_model", lambda: fake)
+    pathology_registry._DETECTOR_REGISTRY.clear()
+    register_yolo_pathology_detectors()
+    img = np.zeros((64, 64, 3), dtype=np.uint8)
+    for code in ("dental_caries", "periapical_lesion", "impacted_teeth"):
+        res = evaluate_condition(code, img)
+        assert res.status == PathologyStatus.NEGATIVE
+        assert res.findings == []
+
+
+def test_unknown_model_class_is_ignored(_isolate_pathology_registry):
+    """A model class name outside the manifest must be dropped, not crash."""
+    import modules.pathology.yolo_detector as yd
+    fake = _FakeYolo(
+        rows=[(7, 0.99, [10.0, 10.0, 50.0, 50.0])],
+        names={0: "caries", 7: "mystery_class"},
+    )
+    grouped = yd.run_pathology_inference(
+        fake, np.zeros((64, 64, 3), dtype=np.uint8)
+    )
+    assert grouped["dental_caries"] == []
+    assert grouped["impacted_teeth"] == []
 
 
 # ---------------------------------------------------------------------------

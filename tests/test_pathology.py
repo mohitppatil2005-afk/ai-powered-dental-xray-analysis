@@ -101,3 +101,29 @@ def test_custom_detector_registration():
     register_pathology_detector(code, None)
     res_reset = evaluate_condition(code, dummy_img)
     assert res_reset.is_configured is False
+
+
+def test_bone_loss_has_no_detector_registered():
+    """Guard: the caries/periapical/impacted detector must never be reused
+    as a bone-loss detector. Bone loss stays NOT_CONFIGURED until a genuine,
+    verified PBL model with downloadable weights is integrated."""
+    from modules.pathology.yolo_detector import (
+        PATHOLOGY_CLASS_TO_CONDITION,
+        register_yolo_pathology_detectors,
+    )
+    from modules.pathology import registry as reg
+
+    saved = dict(reg._DETECTOR_REGISTRY)
+    reg._DETECTOR_REGISTRY.clear()
+    try:
+        registered = register_yolo_pathology_detectors()
+        assert "periodontal_bone_loss" not in registered
+        assert "periodontal_bone_loss" not in PATHOLOGY_CLASS_TO_CONDITION.values()
+        dummy_img = np.zeros((100, 100, 3), dtype=np.uint8)
+        res = evaluate_condition("periodontal_bone_loss", dummy_img)
+        assert res.is_configured is False
+        assert res.status == PathologyStatus.NOT_CONFIGURED
+        assert res.findings == []
+    finally:
+        reg._DETECTOR_REGISTRY.clear()
+        reg._DETECTOR_REGISTRY.update(saved)
