@@ -1,20 +1,37 @@
+"""
+modules/analysis_status.py
+==========================
+High-level module status reporting for user interface and text summaries.
+"""
+
+from modules.pathology.registry import TARGET_PATHOLOGIES
+
 
 ANALYSIS_MODULES = {
-    "Tooth segmentation": {
-        "configured": False,
-        "description": "Identify individual teeth in the X-ray."
+    "Tooth segmentation & FDI numbering": {
+        "configured": True,
+        "description": "Instance segmentation (Mask R-CNN ResNet-50) with Anatomical FDI Resolver.",
+        "validation_status": "Validated on AKUDENTAL held-out set (88.0% F1, 83.6% mean IoU).",
     },
     "Dental caries": {
         "configured": False,
-        "description": "Highlight possible cavity regions."
+        "description": TARGET_PATHOLOGIES["dental_caries"]["description"],
+        "validation_status": TARGET_PATHOLOGIES["dental_caries"]["validation_limitation"],
     },
     "Periodontal bone loss": {
         "configured": False,
-        "description": "Assess possible periodontal bone loss."
+        "description": TARGET_PATHOLOGIES["periodontal_bone_loss"]["description"],
+        "validation_status": TARGET_PATHOLOGIES["periodontal_bone_loss"]["validation_limitation"],
     },
     "Periapical abnormalities": {
         "configured": False,
-        "description": "Highlight possible abnormalities near tooth roots."
+        "description": TARGET_PATHOLOGIES["periapical_lesion"]["description"],
+        "validation_status": TARGET_PATHOLOGIES["periapical_lesion"]["validation_limitation"],
+    },
+    "Impacted teeth": {
+        "configured": False,
+        "description": TARGET_PATHOLOGIES["impacted_teeth"]["description"],
+        "validation_status": TARGET_PATHOLOGIES["impacted_teeth"]["validation_limitation"],
     },
 }
 
@@ -24,10 +41,10 @@ def get_module_status():
         name: {
             **details,
             "status": (
-                "Model configured"
+                f"Model configured — {details['validation_status']}"
                 if details["configured"]
-                else "Model not configured — no prediction generated"
-            )
+                else f"Model not configured — {details['validation_status']}"
+            ),
         }
         for name, details in ANALYSIS_MODULES.items()
     }
