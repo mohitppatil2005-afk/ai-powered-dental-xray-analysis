@@ -423,16 +423,18 @@ def generate_dental_pdf_report(
         story.append(Paragraph("6. Model Provenance & Verification Metadata", section_heading))
         prov = model_provenance or {}
         prov_rows = [
-            [Paragraph("<b>Tooth Segmentation Architecture:</b>", table_cell),
-             Paragraph(prov.get("segmentation_model", "Mask R-CNN ResNet-50+FPN (Torchvision)"), table_cell)],
-            [Paragraph("<b>Segmentation Model Checkpoint:</b>", table_cell),
-             Paragraph(prov.get("segmentation_weights", "outputs/results/maskrcnn_torch/best.pth (176.9 MB)"), table_cell)],
+            [Paragraph("<b>Tooth Segmentation Model:</b>", table_cell),
+             Paragraph(prov.get("segmentation_model", "Not provided"), table_cell)],
+            [Paragraph("<b>Segmentation Weights:</b>", table_cell),
+             Paragraph(prov.get("segmentation_weights", "Not provided"), table_cell)],
+            [Paragraph("<b>Pathology Detector Model:</b>", table_cell),
+             Paragraph(prov.get("pathology_model", "Not provided"), table_cell)],
             [Paragraph("<b>Validation Dataset Benchmark:</b>", table_cell),
-             Paragraph("Research prototype — validation metrics pending independent review.", table_cell)],
+             Paragraph(prov.get("validation_dataset", "Research prototype — validation metrics pending independent review."), table_cell)],
             [Paragraph("<b>Anatomical Post-Processor:</b>", table_cell),
              Paragraph("fdi_resolver.py (NMS overlap suppression, quadrant verification, duplicate resolution)", table_cell)],
             [Paragraph("<b>Inference Device / Framework:</b>", table_cell),
-             Paragraph(prov.get("device", "CPU (PyTorch 2.14.1)"), table_cell)],
+             Paragraph(prov.get("device", "Not provided"), table_cell)],
         ]
         prov_table = Table(prov_rows, colWidths=[170, 370])
         prov_table.setStyle(TableStyle([

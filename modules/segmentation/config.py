@@ -1,13 +1,22 @@
 """
 modules/segmentation/config.py
 ==============================
-Configuration, class mappings, and anatomical metadata for the 36-class
-dental panoramic tooth instance segmentation model.
+Configuration, class mappings, and anatomical metadata for dental panoramic
+tooth instance segmentation models.
+
+Two backends are supported:
+- "maskrcnn": local 36-class Torchvision Mask R-CNN checkpoint (teeth +
+  restorations) — the project's original model; requires a user-supplied
+  trained checkpoint (no public weights exist).
+- "yolov8": a public pretrained 32-tooth instance segmentation model
+  (promitbhattacharjee/dental-panoramic-xray-segmentation, AGPL-3.0,
+  ~7 MB) that segments and numbers individual teeth. It does NOT detect
+  restoration classes.
 """
 
 import os
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # Default path to the validated 36-class Mask R-CNN checkpoint.
 # Override with the DENTAL_SEG_WEIGHTS environment variable.
@@ -21,6 +30,28 @@ DEFAULT_CHECKPOINT_PATH = Path(
     )
 )
 
+# ---------------------------------------------------------------------------
+# Public pretrained YOLOv8 32-tooth instance segmentation backend
+# ---------------------------------------------------------------------------
+# Source: https://huggingface.co/promitbhattacharjee/dental-panoramic-xray-segmentation
+# License: AGPL-3.0 (upstream Ultralytics licensing). Non-clinical research use.
+# Architecture: YOLOv8-nano segmentation (yolov8n-seg), 32 classes Tooth_1..Tooth_32.
+# Reported (unverified) metrics from the model card: mask mAP50 94.4%, P 89.8%, R 91.0%.
+YOLO_HF_REPO_ID = "promitbhattacharjee/dental-panoramic-xray-segmentation"
+YOLO_HF_WEIGHTS_FILENAME = "best.pt"
+YOLO_WEIGHTS_APPROX_BYTES = 7_036_980  # ~7.0 MB
+
+DEFAULT_YOLO_WEIGHTS_PATH = Path(
+    os.getenv(
+        "DENTAL_SEG_YOLO_WEIGHTS",
+        "models/weights/yolov8n_teeth32/best.pt",
+    )
+)
+
+# Backend selection environment variable: "auto" (default), "maskrcnn", "yolov8", "none".
+SEG_BACKEND_ENV = "DENTAL_SEG_BACKEND"
+VALID_SEG_BACKENDS = ("auto", "maskrcnn", "yolov8", "none")
+
 NUM_CLASSES = 36  # Background (0) + 32 FDI teeth (1-32) + 3 restorations (33-35)
 
 MODEL_CLASSES: List[str] = [
@@ -33,6 +64,31 @@ MODEL_CLASSES: List[str] = [
 ]
 
 RESTORATION_CLASSES = {'Bridge', 'Filling-Crown', 'Implant'}
+
+
+def universal_tooth_to_fdi(universal_index: int) -> Optional[str]:
+    """
+    Map the YOLO backend's 1-based 'Tooth_N' class index (universal-style
+    numbering: 1-16 upper arch right-to-left, 17-32 lower arch left-to-right)
+    to the corresponding two-digit FDI code. Returns None if out of range.
+    """
+    if 1 <= universal_index <= 8:      # Upper right quadrant (FDI 18 -> 11)
+        return str(19 - universal_index)
+    if 9 <= universal_index <= 16:     # Upper left quadrant (FDI 21 -> 28)
+        return str(12 + universal_index)
+    if 17 <= universal_index <= 24:    # Lower left quadrant (FDI 38 -> 31)
+        return str(55 - universal_index)
+    if 25 <= universal_index <= 32:    # Lower right quadrant (FDI 41 -> 48)
+        return str(universal_index + 16)
+    return None
+
+
+def fdi_to_model_class_id(fdi_code: str) -> int:
+    """Return the MODEL_CLASSES index for an FDI tooth code (or -1 if absent)."""
+    try:
+        return MODEL_CLASSES.index(fdi_code)
+    except ValueError:
+        return -1
 
 # Confidence thresholds for FDI assignment status.
 # These are engineering thresholds for a research prototype; they are NOT

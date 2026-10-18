@@ -5,9 +5,7 @@ AI-Powered Dental Panoramic X-Ray Analysis System
 Streamlit Application Entry Point
 """
 
-import os
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import datetime, timezone  # noqa: F401 (legacy import)
 import uuid
 import numpy as np
 import pandas as pd
@@ -16,14 +14,26 @@ import streamlit as st
 
 from preprocessing.validation import validate_and_load_image
 from preprocessing.enhancement import enhance_xray, enhance_rgb_xray
-from modules.segmentation.model import (
-    load_segmentation_model,
-    run_segmentation_inference,
-)
 from modules.segmentation.fdi_resolver import resolve_dental_arch
 from modules.segmentation.visualization import create_segmentation_overlay
 from modules.segmentation.config import DEFAULT_CHECKPOINT_PATH
+from modules.segmentation.backend import (
+    SegmentationBackendInfo,
+    resolve_segmentation_backend,
+    run_segmentation,
+)
+from modules.segmentation.yolo_adapter import (
+    download_yolo_weights,
+    yolo_backend_available,
+    yolo_weights_info,
+)
 from modules.pathology.registry import evaluate_all_pathologies
+from modules.pathology.yolo_detector import (
+    download_pathology_weights,
+    pathology_model_available,
+    pathology_weights_info,
+    register_yolo_pathology_detectors,
+)
 from modules.analysis_status import get_module_status
 from utils.report import create_report, report_as_json, report_as_text
 from utils.pdf_report import generate_dental_pdf_report
@@ -34,6 +44,15 @@ st.set_page_config(
     page_icon="🦷",
     layout="wide",
 )
+
+# Register the public pretrained YOLO pathology detectors with the registry.
+# Safe to call on every rerun; the underlying model loads lazily on first
+# inference. If registration fails, the app still works and conditions fall
+# back to explicit NOT_CONFIGURED statuses.
+try:
+    _registered_conditions = register_yolo_pathology_detectors()
+except Exception:
+    _registered_conditions = []
 
 st.title("🦷 AI-Powered Dental Panoramic X-Ray Analysis")
 
@@ -113,34 +132,107 @@ st.caption(f"Image dimensions: {val_result.width} × {val_result.height} pixels 
 
 st.subheader("3. Tooth instance segmentation & FDI numbering")
 
-# Checkpoint availability gate
-_checkpoint_path = Path(DEFAULT_CHECKPOINT_PATH)
-_checkpoint_available = _checkpoint_path.exists()
+# ── 3a. Backend selection & weight management ─────────────────────────────────
 
-if not _checkpoint_available:
-    st.info(
-        "✅ Image preprocessing complete. "
-        "Tooth segmentation is **unavailable** because no trained checkpoint was found.\n\n"
-        "To enable segmentation:\n"
-        "1. Obtain a compatible 36-class Mask R-CNN ResNet-50+FPN checkpoint (.pth)\n"
-        f"2. Place it at: `{_checkpoint_path}`\n"
-        "   Or set the `DENTAL_SEG_WEIGHTS` environment variable to your checkpoint path:\n"
-        "   `export DENTAL_SEG_WEIGHTS=/path/to/your/checkpoint.pth`\n"
-        "3. Restart the application.\n\n"
-        "No tooth masks, FDI numbers, or confidence scores will be generated until a "
-        "valid checkpoint is loaded. All other features (enhancement, pathology status, "
-        "reporting) remain available."
-    )
+seg_backend_choice = st.radio(
+    "Segmentation backend",
+    options=["auto", "yolov8", "maskrcnn", "none"],
+    index=0,
+    horizontal=True,
+    help=(
+        "auto: prefer the public YOLOv8 32-tooth model if weights are present, "
+        "else the local Mask R-CNN checkpoint. Force a specific backend, or "
+        "'none' to disable segmentation entirely."
+    ),
+)
+
+seg_info: SegmentationBackendInfo = resolve_segmentation_backend(seg_backend_choice)
+
+info_col1, info_col2 = st.columns(2)
+
+with info_col1:
+    if seg_info.name == "yolov8":
+        st.success(
+            f"Segmentation: {seg_info.source}\n\n"
+            f"Weights: `{seg_info.weights_path}`\n\n"
+            "Note: this backend segments teeth only — restorations "
+            "(bridge/crown/implant) are NOT detected."
+        )
+    elif seg_info.name == "maskrcnn":
+        st.success(
+            f"Segmentation: {seg_info.source}\n\n"
+            f"Weights: `{seg_info.weights_path}`\n\n"
+            "This backend also detects restorations (bridge/crown/implant)."
+        )
+    elif seg_backend_choice == "yolov8":
+        st.warning(
+            "YOLOv8 segmentation weights not found. Download them below or set "
+            "DENTAL_SEG_YOLO_WEIGHTS to a local copy."
+        )
+    elif seg_backend_choice == "maskrcnn":
+        st.warning(
+            "Mask R-CNN checkpoint not found. Train one and place it at "
+            f"`{DEFAULT_CHECKPOINT_PATH}` or set DENTAL_SEG_WEIGHTS."
+        )
+    elif seg_backend_choice == "none":
+        st.info("Segmentation disabled. Analysis will proceed without tooth numbering.")
+    else:
+        st.warning(
+            "No segmentation backend available. Download the YOLOv8 weights below "
+            "(recommended) or configure a local Mask R-CNN checkpoint."
+        )
+
+    if st.button(
+        "⬇️ Download YOLOv8 tooth-segmentation weights (~7 MB)",
+        disabled=yolo_backend_available(),
+        use_container_width=True,
+    ):
+        try:
+            with st.spinner("Downloading YOLOv8 weights from Hugging Face..."):
+                download_yolo_weights()
+            st.success("YOLOv8 segmentation weights downloaded.")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Failed to download YOLOv8 weights: {exc}")
+
+with info_col2:
+    patho_info = pathology_weights_info()
+    if patho_info["available"]:
+        st.success(
+            f"Pathology detector: YOLO11n ({patho_info['repo']}, "
+            f"{patho_info['license']}, ~{patho_info['approx_size_mb']} MB)\n\n"
+            "Covers: dental caries, periapical lesions, impacted teeth.\n\n"
+            "NOT covered: periodontal bone loss (no public weights exist — stays unavailable)."
+        )
+    else:
+        st.warning(
+            "Pathology detector weights not found. Download them below or set "
+            "DENTAL_PATHO_YOLO_WEIGHTS to a local copy."
+        )
+
+    if st.button(
+        "⬇️ Download YOLO11 pathology-detector weights (~5.5 MB)",
+        disabled=patho_info["available"],
+        use_container_width=True,
+    ):
+        try:
+            with st.spinner("Downloading YOLO11 pathology weights from Hugging Face..."):
+                download_pathology_weights()
+            st.success("YOLO11 pathology weights downloaded.")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Failed to download pathology weights: {exc}")
+
+    if yolo_backend_available():
+        seg_yolo_info = yolo_weights_info()
+        st.caption(
+            f"Segmentation model card: {seg_yolo_info['url']} "
+            f"(license: {seg_yolo_info['license']})"
+        )
     st.caption(
-        f"Checked paths: `{_checkpoint_path}` | "
-        f"Env var `DENTAL_SEG_WEIGHTS`: "
-        f"{os.environ.get('DENTAL_SEG_WEIGHTS', '(not set)')}"
+        f"Pathology model card: {patho_info['url']} "
+        f"(license: {patho_info['license']})"
     )
-
-@st.cache_resource(show_spinner=False)
-def get_cached_segmentation_model():
-    """Load model once and cache in memory."""
-    return load_segmentation_model()
 
 with st.expander("⚙️ Segmentation & Resolver Settings", expanded=False):
     col_s1, col_s2, col_s3 = st.columns(3)
@@ -155,24 +247,24 @@ with st.expander("⚙️ Segmentation & Resolver Settings", expanded=False):
 dental_arch = None
 segmentation_overlay = None
 seg_device = "CPU"
+seg_backend_used = None
 
-if _checkpoint_available:
+if seg_info.name is not None:
     try:
-        with st.spinner("Loading Mask R-CNN segmentation model..."):
-            seg_model, seg_device = get_cached_segmentation_model()
-        st.success(
-            f"✅ Segmentation model loaded from `{_checkpoint_path}` "
-            f"(device: {seg_device})."
-        )
-
-        with st.spinner("Running tooth segmentation and anatomical FDI resolver..."):
-            seg_model, seg_device = get_cached_segmentation_model()
-            raw_seg_output = run_segmentation_inference(
-                model=seg_model,
+        with st.spinner(
+            f"Running tooth segmentation ({seg_info.name}) and anatomical FDI resolver..."
+        ):
+            raw_seg_output, seg_backend_used = run_segmentation(
                 image_rgb=enhanced_rgb,
-                device=seg_device,
+                backend=seg_backend_choice,
                 conf_threshold=conf_thresh,
             )
+        seg_device = raw_seg_output.device_used
+        st.success(
+            f"✅ Segmentation backend active: **{seg_backend_used}** — {seg_info.source} "
+            f"(weights: `{seg_info.weights_path}`, device: {seg_device})."
+        )
+
         dental_arch = resolve_dental_arch(
             raw_detections=raw_seg_output.detections,
             image_shape=(val_result.height, val_result.width),
@@ -283,18 +375,18 @@ if _checkpoint_available:
                 st.success("Zero unresolved tooth conflicts. All proposals successfully assigned or cleanly filtered.")
 
     except FileNotFoundError as exc:
-        st.error(f"Segmentation checkpoint not found: {exc}")
-        st.info("Analysis will continue with segmentation marked as unavailable.")
+        st.error(f"Segmentation weights not found: {exc}")
+        st.info("Use the download buttons above, or set the appropriate weights env var.")
     except RuntimeError as exc:
-        st.error(f"Failed to load segmentation checkpoint: {exc}")
-        st.info("The checkpoint may be incompatible or corrupted. Analysis will continue without segmentation.")
+        st.error(f"Failed to load segmentation model: {exc}")
+        st.info("The weights may be incompatible or corrupted. Try re-downloading them above.")
     except Exception as exc:
         st.error(f"Tooth segmentation failed: {exc}")
         st.info("Analysis will continue with segmentation marked as unavailable.")
 else:
     st.info(
-        "Tooth segmentation is disabled until a trained checkpoint is configured. "
-        "See the checkpoint notice above for setup instructions."
+        "Tooth segmentation is unavailable for the selected backend. "
+        "Download the YOLOv8 weights above (recommended) or configure a Mask R-CNN checkpoint."
     )
 
 
@@ -334,9 +426,24 @@ try:
         filename=uploaded_file.name,
         analysis_id=analysis_uuid,
         model_provenance={
-            "segmentation_model": "Mask R-CNN ResNet-50+FPN (Torchvision)",
-            "segmentation_weights": "outputs/results/maskrcnn_torch/best.pth",
-            "device": str(seg_device) if 'seg_device' in locals() else "CPU",
+            "segmentation_model": (
+                f"{seg_backend_used.upper()} — {seg_info.source}"
+                if seg_backend_used and seg_info.name
+                else "Unavailable (no backend/weights)"
+            ),
+            "segmentation_weights": (
+                seg_info.weights_path if seg_info.name else "N/A"
+            ),
+            "device": str(seg_device),
+            "pathology_model": (
+                f"YOLO11n — {pathology_weights_info()['repo']} "
+                f"({pathology_weights_info()['license']})"
+                if pathology_model_available()
+                else "Unavailable"
+            ),
+            "validation_dataset": (
+                "DENTEX + OralXrays-9 (upstream, unverified in this repository)"
+            ),
         },
     )
     pdf_ready = True
