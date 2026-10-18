@@ -428,7 +428,7 @@ def generate_dental_pdf_report(
             [Paragraph("<b>Segmentation Model Checkpoint:</b>", table_cell),
              Paragraph(prov.get("segmentation_weights", "outputs/results/maskrcnn_torch/best.pth (176.9 MB)"), table_cell)],
             [Paragraph("<b>Validation Dataset Benchmark:</b>", table_cell),
-             Paragraph("AKUDENTAL 67-image held-out validation set (88.0% F1, 83.6% mean IoU)", table_cell)],
+             Paragraph("Research prototype — validation metrics pending independent review.", table_cell)],
             [Paragraph("<b>Anatomical Post-Processor:</b>", table_cell),
              Paragraph("fdi_resolver.py (NMS overlap suppression, quadrant verification, duplicate resolution)", table_cell)],
             [Paragraph("<b>Inference Device / Framework:</b>", table_cell),

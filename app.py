@@ -5,7 +5,9 @@ AI-Powered Dental Panoramic X-Ray Analysis System
 Streamlit Application Entry Point
 """
 
+import os
 from datetime import datetime, timezone
+from pathlib import Path
 import uuid
 import numpy as np
 import pandas as pd
@@ -20,6 +22,7 @@ from modules.segmentation.model import (
 )
 from modules.segmentation.fdi_resolver import resolve_dental_arch
 from modules.segmentation.visualization import create_segmentation_overlay
+from modules.segmentation.config import DEFAULT_CHECKPOINT_PATH
 from modules.pathology.registry import evaluate_all_pathologies
 from modules.analysis_status import get_module_status
 from utils.report import create_report, report_as_json, report_as_text
@@ -110,6 +113,30 @@ st.caption(f"Image dimensions: {val_result.width} × {val_result.height} pixels 
 
 st.subheader("3. Tooth instance segmentation & FDI numbering")
 
+# Checkpoint availability gate
+_checkpoint_path = Path(DEFAULT_CHECKPOINT_PATH)
+_checkpoint_available = _checkpoint_path.exists()
+
+if not _checkpoint_available:
+    st.info(
+        "✅ Image preprocessing complete. "
+        "Tooth segmentation is **unavailable** because no trained checkpoint was found.\n\n"
+        "To enable segmentation:\n"
+        "1. Obtain a compatible 36-class Mask R-CNN ResNet-50+FPN checkpoint (.pth)\n"
+        f"2. Place it at: `{_checkpoint_path}`\n"
+        "   Or set the `DENTAL_SEG_WEIGHTS` environment variable to your checkpoint path:\n"
+        "   `export DENTAL_SEG_WEIGHTS=/path/to/your/checkpoint.pth`\n"
+        "3. Restart the application.\n\n"
+        "No tooth masks, FDI numbers, or confidence scores will be generated until a "
+        "valid checkpoint is loaded. All other features (enhancement, pathology status, "
+        "reporting) remain available."
+    )
+    st.caption(
+        f"Checked paths: `{_checkpoint_path}` | "
+        f"Env var `DENTAL_SEG_WEIGHTS`: "
+        f"{os.environ.get('DENTAL_SEG_WEIGHTS', '(not set)')}"
+    )
+
 @st.cache_resource(show_spinner=False)
 def get_cached_segmentation_model():
     """Load model once and cache in memory."""
@@ -127,16 +154,25 @@ with st.expander("⚙️ Segmentation & Resolver Settings", expanded=False):
 
 dental_arch = None
 segmentation_overlay = None
+seg_device = "CPU"
 
-try:
-    with st.spinner("Running Mask R-CNN tooth segmentation and anatomical FDI resolver..."):
-        seg_model, seg_device = get_cached_segmentation_model()
-        raw_seg_output = run_segmentation_inference(
-            model=seg_model,
-            image_rgb=enhanced_rgb,
-            device=seg_device,
-            conf_threshold=conf_thresh,
+if _checkpoint_available:
+    try:
+        with st.spinner("Loading Mask R-CNN segmentation model..."):
+            seg_model, seg_device = get_cached_segmentation_model()
+        st.success(
+            f"✅ Segmentation model loaded from `{_checkpoint_path}` "
+            f"(device: {seg_device})."
         )
+
+        with st.spinner("Running tooth segmentation and anatomical FDI resolver..."):
+            seg_model, seg_device = get_cached_segmentation_model()
+            raw_seg_output = run_segmentation_inference(
+                model=seg_model,
+                image_rgb=enhanced_rgb,
+                device=seg_device,
+                conf_threshold=conf_thresh,
+            )
         dental_arch = resolve_dental_arch(
             raw_detections=raw_seg_output.detections,
             image_shape=(val_result.height, val_result.width),
@@ -152,103 +188,114 @@ try:
             show_contours=show_contours,
         )
 
-    # Summary Metrics
-    m1, m2, m3, m4, m5 = st.columns(5)
-    with m1:
-        st.metric("Confirmed Teeth", dental_arch.total_detected_teeth)
-    with m2:
-        st.metric("Restorations", dental_arch.total_restorations)
-    with m3:
-        st.metric("Unassigned / Uncertain", len(dental_arch.unassigned))
-    with m4:
-        st.metric("Unobserved Permanent", len(dental_arch.missing_teeth))
-    with m5:
-        st.metric("Inference Time", f"{raw_seg_output.inference_time:.2f}s")
+        # Summary Metrics
+        m1, m2, m3, m4, m5 = st.columns(5)
+        with m1:
+            st.metric("Confirmed Teeth", dental_arch.total_detected_teeth)
+        with m2:
+            st.metric("Restorations", dental_arch.total_restorations)
+        with m3:
+            st.metric("Unassigned / Uncertain", len(dental_arch.unassigned))
+        with m4:
+            st.metric("Unobserved Permanent", len(dental_arch.missing_teeth))
+        with m5:
+            st.metric("Inference Time", f"{raw_seg_output.inference_time:.2f}s")
 
-    # Display Visual Overlay
-    st.image(segmentation_overlay, caption="Tooth Instance Segmentation Overlay with FDI Numbering", use_container_width=True)
+        # Display Visual Overlay
+        st.image(segmentation_overlay, caption="Tooth Instance Segmentation Overlay with FDI Numbering", use_container_width=True)
 
-    # Display Quadrant Distribution Pills
-    q_counts = dental_arch.quadrant_counts
-    st.markdown(
-        f"**Quadrant Tooth Counts:** "
-        f"`Q1 (Upper Right): {q_counts['UR']}` | "
-        f"`Q2 (Upper Left): {q_counts['UL']}` | "
-        f"`Q3 (Lower Left): {q_counts['LL']}` | "
-        f"`Q4 (Lower Right): {q_counts['LR']}`"
+        # Display Quadrant Distribution Pills
+        q_counts = dental_arch.quadrant_counts
+        st.markdown(
+            f"**Quadrant Tooth Counts:** "
+            f"`Q1 (Upper Right): {q_counts['UR']}` | "
+            f"`Q2 (Upper Left): {q_counts['UL']}` | "
+            f"`Q3 (Lower Left): {q_counts['LL']}` | "
+            f"`Q4 (Lower Right): {q_counts['LR']}`"
+        )
+
+        # Tabs for Tooth Table, Restorations, and Unobserved Teeth
+        tab_teeth, tab_rest, tab_miss, tab_uncertain = st.tabs([
+            "🦷 FDI Tooth Table",
+            "🛠️ Restorations & Prosthetics",
+            "🔍 Unobserved Permanent Teeth",
+            "❓ Uncertain Detections",
+        ])
+
+        with tab_teeth:
+            if dental_arch.teeth:
+                teeth_table_data = [
+                    {
+                        "FDI #": t.fdi_number,
+                        "Quadrant": t.quadrant,
+                        "Anatomical Description": t.anatomical_name,
+                        "Confidence": f"{t.confidence * 100:.1f}%",
+                        "Status": t.status,
+                        "Validation Note": t.status_note,
+                    }
+                    for t in dental_arch.teeth
+                ]
+                st.dataframe(pd.DataFrame(teeth_table_data), use_container_width=True, hide_index=True)
+            else:
+                st.info("No confirmed tooth instances detected at current confidence threshold.")
+
+        with tab_rest:
+            if dental_arch.restorations:
+                rest_table_data = [
+                    {
+                        "Restoration Type": r.restoration_type,
+                        "Centroid (X, Y)": f"({r.centroid[0]}, {r.centroid[1]})",
+                        "Mask Area (px)": r.area,
+                        "Confidence": f"{r.confidence * 100:.1f}%",
+                        "Clinical Classification": r.status_note,
+                    }
+                    for r in dental_arch.restorations
+                ]
+                st.dataframe(pd.DataFrame(rest_table_data), use_container_width=True, hide_index=True)
+            else:
+                st.info("No restorations (implants, bridges, fillings) detected.")
+
+        with tab_miss:
+            if dental_arch.missing_teeth:
+                missing_str = ", ".join(dental_arch.missing_teeth)
+                st.markdown(f"**Permanent teeth unobserved in this 2D radiograph ({len(dental_arch.missing_teeth)} teeth):**")
+                st.code(missing_str)
+                st.caption(
+                    "Note: 'Unobserved' indicates that a clear tooth contour was not identified in this scan. "
+                    "This does not confirm clinical extraction, impaction, or agenesis without independent clinical correlation."
+                )
+            else:
+                st.success("All 32 permanent teeth were identified in this radiograph.")
+
+        with tab_uncertain:
+            if dental_arch.unassigned:
+                unc_table_data = [
+                    {
+                        "Candidate Instance": f"#{u.instance_id}",
+                        "Centroid (X, Y)": f"({u.centroid[0]}, {u.centroid[1]})",
+                        "Confidence": f"{u.confidence * 100:.1f}%",
+                        "Uncertainty Reason": u.status_note,
+                    }
+                    for u in dental_arch.unassigned
+                ]
+                st.dataframe(pd.DataFrame(unc_table_data), use_container_width=True, hide_index=True)
+            else:
+                st.success("Zero unresolved tooth conflicts. All proposals successfully assigned or cleanly filtered.")
+
+    except FileNotFoundError as exc:
+        st.error(f"Segmentation checkpoint not found: {exc}")
+        st.info("Analysis will continue with segmentation marked as unavailable.")
+    except RuntimeError as exc:
+        st.error(f"Failed to load segmentation checkpoint: {exc}")
+        st.info("The checkpoint may be incompatible or corrupted. Analysis will continue without segmentation.")
+    except Exception as exc:
+        st.error(f"Tooth segmentation failed: {exc}")
+        st.info("Analysis will continue with segmentation marked as unavailable.")
+else:
+    st.info(
+        "Tooth segmentation is disabled until a trained checkpoint is configured. "
+        "See the checkpoint notice above for setup instructions."
     )
-
-    # Tabs for Tooth Table, Restorations, and Unobserved Teeth
-    tab_teeth, tab_rest, tab_miss, tab_uncertain = st.tabs([
-        "🦷 FDI Tooth Table",
-        "🛠️ Restorations & Prosthetics",
-        "🔍 Unobserved Permanent Teeth",
-        "❓ Uncertain Detections",
-    ])
-
-    with tab_teeth:
-        if dental_arch.teeth:
-            teeth_table_data = [
-                {
-                    "FDI #": t.fdi_number,
-                    "Quadrant": t.quadrant,
-                    "Anatomical Description": t.anatomical_name,
-                    "Confidence": f"{t.confidence * 100:.1f}%",
-                    "Status": t.status,
-                    "Validation Note": t.status_note,
-                }
-                for t in dental_arch.teeth
-            ]
-            st.dataframe(pd.DataFrame(teeth_table_data), use_container_width=True, hide_index=True)
-        else:
-            st.info("No confirmed tooth instances detected at current confidence threshold.")
-
-    with tab_rest:
-        if dental_arch.restorations:
-            rest_table_data = [
-                {
-                    "Restoration Type": r.restoration_type,
-                    "Centroid (X, Y)": f"({r.centroid[0]}, {r.centroid[1]})",
-                    "Mask Area (px)": r.area,
-                    "Confidence": f"{r.confidence * 100:.1f}%",
-                    "Clinical Classification": r.status_note,
-                }
-                for r in dental_arch.restorations
-            ]
-            st.dataframe(pd.DataFrame(rest_table_data), use_container_width=True, hide_index=True)
-        else:
-            st.info("No restorations (implants, bridges, fillings) detected.")
-
-    with tab_miss:
-        if dental_arch.missing_teeth:
-            missing_str = ", ".join(dental_arch.missing_teeth)
-            st.markdown(f"**Permanent teeth unobserved in this 2D radiograph ({len(dental_arch.missing_teeth)} teeth):**")
-            st.code(missing_str)
-            st.caption(
-                "Note: 'Unobserved' indicates that a clear tooth contour was not identified in this scan. "
-                "This does not confirm clinical extraction, impaction, or agenesis without independent clinical correlation."
-            )
-        else:
-            st.success("All 32 permanent teeth were identified in this radiograph.")
-
-    with tab_uncertain:
-        if dental_arch.unassigned:
-            unc_table_data = [
-                {
-                    "Candidate Instance": f"#{u.instance_id}",
-                    "Centroid (X, Y)": f"({u.centroid[0]}, {u.centroid[1]})",
-                    "Confidence": f"{u.confidence * 100:.1f}%",
-                    "Uncertainty Reason": u.status_note,
-                }
-                for u in dental_arch.unassigned
-            ]
-            st.dataframe(pd.DataFrame(unc_table_data), use_container_width=True, hide_index=True)
-        else:
-            st.success("Zero unresolved tooth conflicts. All proposals successfully assigned or cleanly filtered.")
-
-except Exception as exc:
-    st.error(f"Tooth segmentation failed: {exc}")
-    st.info("Analysis will continue with segmentation marked as unavailable.")
 
 
 # ── 4. Dental Pathology Detection Status ───────────────────────────────────────
@@ -280,7 +327,7 @@ analysis_uuid = f"DENT-{uuid.uuid4().hex[:8].upper()}"
 try:
     pdf_bytes = generate_dental_pdf_report(
         original_rgb=original_rgb,
-        enhanced_rgb=enhanced_gray,
+        enhanced_rgb=enhanced_rgb,
         segmentation_overlay_rgb=segmentation_overlay,
         dental_arch=dental_arch,
         pathology_results=pathology_results,

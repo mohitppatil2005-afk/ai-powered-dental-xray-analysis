@@ -13,6 +13,7 @@ Responsibilities:
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import os
 import time
 from typing import List, Optional, Tuple, Union
 
@@ -106,10 +107,20 @@ def load_segmentation_model(
     Load the 36-class Mask R-CNN checkpoint into memory.
 
     Caches the loaded model. Handles missing weights gracefully.
+
+    The checkpoint path is resolved on each call: if no explicit path is given,
+    the DENTAL_SEG_WEIGHTS environment variable is read, falling back to the
+    default relative path. This allows tests and callers to override the path
+    via the environment variable after module import.
     """
     global _LOADED_MODEL, _LOADED_PATH, _LOADED_DEVICE
 
-    target_path = Path(checkpoint_path) if checkpoint_path else DEFAULT_CHECKPOINT_PATH
+    if checkpoint_path is not None:
+        target_path = Path(checkpoint_path)
+    else:
+        target_path = Path(
+            os.getenv("DENTAL_SEG_WEIGHTS", str(DEFAULT_CHECKPOINT_PATH))
+        )
     target_device = device if device is not None else get_default_device()
 
     if not force_reload and _LOADED_MODEL is not None:

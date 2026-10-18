@@ -9,11 +9,15 @@ import os
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-# Default path to the validated 36-class Mask R-CNN checkpoint
+# Default path to the validated 36-class Mask R-CNN checkpoint.
+# Override with the DENTAL_SEG_WEIGHTS environment variable.
+# The shipped default is a Windows development path; on Linux set
+# DENTAL_SEG_WEIGHTS to the location of your checkpoint, or place it at
+# outputs/results/maskrcnn_torch/best.pth relative to the project root.
 DEFAULT_CHECKPOINT_PATH = Path(
     os.getenv(
         "DENTAL_SEG_WEIGHTS",
-        r"C:\Users\mohit\Downloads\dental-segmentation\outputs\results\maskrcnn_torch\best.pth"
+        "outputs/results/maskrcnn_torch/best.pth",
     )
 )
 
@@ -29,6 +33,19 @@ MODEL_CLASSES: List[str] = [
 ]
 
 RESTORATION_CLASSES = {'Bridge', 'Filling-Crown', 'Implant'}
+
+# Confidence thresholds for FDI assignment status.
+# These are engineering thresholds for a research prototype; they are NOT
+# clinically validated and should not be presented as diagnostic criteria.
+#
+# - MIN_MODEL_CONFIDENCE: detections below this score are filtered out entirely.
+# - CONFIRMED_THRESHOLD: model confidence >= this AND anatomically plausible
+#   => status CONFIRMED.
+# - REVIEW_THRESHOLD: model confidence between REVIEW and CONFIRMED => status
+#   UNCERTAIN (needs professional review), even if an FDI number is assigned.
+MIN_MODEL_CONFIDENCE = 0.30
+REVIEW_THRESHOLD = 0.50
+CONFIRMED_THRESHOLD = 0.70
 
 # FDI Quadrant mapping (Standard dental notation)
 # Note: In panoramic X-ray viewing convention:

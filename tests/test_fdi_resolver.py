@@ -141,3 +141,194 @@ def test_missing_teeth_audit():
     assert '21' not in result.missing_teeth
     assert '16' in result.missing_teeth
     assert '36' in result.missing_teeth
+
+
+def test_low_confidence_tooth_is_uncertain_not_confirmed():
+    """Regression: low-confidence assignments (e.g. 40.2%) must be UNCERTAIN,
+    not CONFIRMED. Assigning an FDI number does not imply confirmation."""
+    H, W = 1000, 2000
+    mask = create_dummy_mask(H, W, (1200, 600, 1280, 720))
+    det = RawDetection(
+        mask=mask,
+        bbox=(1200, 600, 1280, 720),
+        centroid=(1240, 660),
+        area=int(mask.sum()),
+        score=0.402,  # reported bug: 40.2% was marked CONFIRMED
+        class_id=20,
+        class_name='34',
+        is_restoration=False,
+    )
+    result = resolve_dental_arch([det], (H, W))
+
+    assert len(result.teeth) == 1
+    tooth = result.teeth[0]
+    assert tooth.fdi_number == '34'
+    assert tooth.confidence == 0.402
+    assert tooth.status == 'UNCERTAIN', f"Expected UNCERTAIN, got {tooth.status}"
+    assert tooth.status != 'CONFIRMED'
+    assert 'below confirmed' in tooth.status_note.lower()
+
+
+def test_reported_low_confidence_examples():
+    """Regression: all three reported low-confidence cases (34: 40.2%, 31: 48.8%,
+    41: 59.8%) must be UNCERTAIN, never CONFIRMED."""
+    H, W = 1000, 2000
+    cases = [
+        ('34', 0.402, (1200, 600, 1280, 720), (1240, 660), 20),   # LL
+        ('31', 0.488, (1200, 300, 1280, 420), (1240, 360), 17),   # LL
+        ('41', 0.598, (800, 600, 880, 720), (840, 660), 25),      # LR
+    ]
+    for fdi, score, box, centroid, class_id in cases:
+        mask = create_dummy_mask(H, W, box)
+        det = RawDetection(
+            mask=mask,
+            bbox=box,
+            centroid=centroid,
+            area=int(mask.sum()),
+            score=score,
+            class_id=class_id,
+            class_name=fdi,
+            is_restoration=False,
+        )
+        result = resolve_dental_arch([det], (H, W))
+        assert len(result.teeth) == 1, f"Expected 1 tooth for {fdi} at {score}"
+        tooth = result.teeth[0]
+        assert tooth.fdi_number == fdi, f"{fdi}: expected FDI assigned"
+        assert tooth.confidence == score, f"{fdi}: confidence mismatch"
+        assert tooth.status == 'UNCERTAIN', (
+            f"{fdi} at {score:.1%} should be UNCERTAIN, got {tooth.status}"
+        )
+        assert tooth.status != 'CONFIRMED', f"{fdi} at {score:.1%} must not be CONFIRMED"
+
+
+def test_confidence_threshold_boundary_confirmed():
+    """Regression: confidence at or above CONFIRMED_THRESHOLD with valid anatomy
+    yields CONFIRMED status."""
+    H, W = 1000, 2000
+    mask = create_dummy_mask(H, W, (1200, 600, 1280, 720))
+    det = RawDetection(
+        mask=mask,
+        bbox=(1200, 600, 1280, 720),
+        centroid=(1240, 660),
+        area=int(mask.sum()),
+        score=0.70,  # exactly at CONFIRMED_THRESHOLD
+        class_id=20,
+        class_name='34',
+        is_restoration=False,
+    )
+    result = resolve_dental_arch([det], (H, W))
+    tooth = result.teeth[0]
+    assert tooth.status == 'CONFIRMED', (
+        f"Expected CONFIRMED at 0.70 confidence, got {tooth.status}"
+    )
+
+
+def test_confidence_threshold_boundary_uncertain():
+    """Regression: confidence just below CONFIRMED_THRESHOLD yields UNCERTAIN,
+    not CONFIRMED."""
+    H, W = 1000, 2000
+    mask = create_dummy_mask(H, W, (1200, 600, 1280, 720))
+    det = RawDetection(
+        mask=mask,
+        bbox=(1200, 600, 1280, 720),
+        centroid=(1240, 660),
+        area=int(mask.sum()),
+        score=0.69,  # just below CONFIRMED_THRESHOLD
+        class_id=20,
+        class_name='34',
+        is_restoration=False,
+    )
+    result = resolve_dental_arch([det], (H, W))
+    tooth = result.teeth[0]
+    assert tooth.status == 'UNCERTAIN', (
+        f"Expected UNCERTAIN at 0.69 confidence, got {tooth.status}"
+    )
+
+
+def test_confidence_review_threshold_boundary():
+    """Regression: confidence at REVIEW_THRESHOLD (0.50) yields UNCERTAIN."""
+    H, W = 1000, 2000
+    mask = create_dummy_mask(H, W, (1200, 600, 1280, 720))
+    det = RawDetection(
+        mask=mask,
+        bbox=(1200, 600, 1280, 720),
+        centroid=(1240, 660),
+        area=int(mask.sum()),
+        score=0.50,  # exactly at REVIEW_THRESHOLD
+        class_id=20,
+        class_name='34',
+        is_restoration=False,
+    )
+    result = resolve_dental_arch([det], (H, W))
+    tooth = result.teeth[0]
+    assert tooth.status == 'UNCERTAIN', (
+        f"Expected UNCERTAIN at 0.50 confidence, got {tooth.status}"
+    )
+
+
+def test_quadrant_mismatch_high_confidence_is_uncertain():
+    """Regression: high model confidence but anatomically implausible quadrant
+    yields UNCERTAIN, not CONFIRMED. Model confidence is distinct from
+    anatomical/resolver confidence."""
+    H, W = 1000, 2000
+    # Establish midline on the left side with two UR teeth
+    m1 = create_dummy_mask(H, W, (400, 200, 480, 320))   # tooth 11, UR-plausible (left side)
+    m2 = create_dummy_mask(H, W, (500, 200, 580, 320))   # tooth 12, UR-plausible (left side)
+    det1 = RawDetection(
+        mask=m1, bbox=(400, 200, 480, 320), centroid=(440, 260),
+        area=int(m1.sum()), score=0.90, class_id=1, class_name='11', is_restoration=False,
+    )
+    det2 = RawDetection(
+        mask=m2, bbox=(500, 200, 580, 320), centroid=(540, 260),
+        area=int(m2.sum()), score=0.90, class_id=2, class_name='12', is_restoration=False,
+    )
+    # Tooth 34 (LL) placed far left (wrong quadrant: LL needs X > midline_x)
+    m3 = create_dummy_mask(H, W, (100, 700, 180, 820))   # far left, lower
+    det3 = RawDetection(
+        mask=m3, bbox=(100, 700, 180, 820), centroid=(140, 760),
+        area=int(m3.sum()), score=0.95, class_id=20, class_name='34', is_restoration=False,
+    )
+
+    result = resolve_dental_arch([det1, det2, det3], (H, W))
+    # Quadrant-mismatched teeth land in unassigned with fdi_number=None
+    mismatch_teeth = [t for t in result.unassigned if t.confidence == 0.95]
+    assert len(mismatch_teeth) == 1, f"Expected 1 unassigned tooth with confidence 0.95, got {len(mismatch_teeth)}"
+    tooth_34 = mismatch_teeth[0]
+    # High confidence (0.95) but quadrant mismatch → UNCERTAIN, not CONFIRMED
+    assert tooth_34.status == 'UNCERTAIN', (
+        f"Expected UNCERTAIN for quadrant mismatch, got {tooth_34.status}"
+    )
+    assert tooth_34.confidence == 0.95  # model confidence preserved separately
+    assert tooth_34.fdi_number is None  # FDI not assigned due to quadrant mismatch
+    assert tooth_34.quadrant == 'UNASSIGNED'
+
+
+def test_duplicate_low_confidence_winner_is_uncertain():
+    """Regression: duplicate FDI proposals where the winner has low confidence
+    must be UNCERTAIN, not CONFIRMED."""
+    H, W = 1000, 2000
+    # Two detections both claiming FDI 11 (UR), non-overlapping masks (IoU=0)
+    # so both survive the IoU suppression step and form a duplicate group
+    mask1 = create_dummy_mask(H, W, (200, 200, 280, 320))
+    det1 = RawDetection(
+        mask=mask1, bbox=(200, 200, 280, 320), centroid=(240, 260),
+        area=int(mask1.sum()), score=0.45, class_id=1, class_name='11', is_restoration=False,
+    )
+    mask2 = create_dummy_mask(H, W, (500, 200, 580, 320))
+    det2 = RawDetection(
+        mask=mask2, bbox=(500, 200, 580, 320), centroid=(540, 260),
+        area=int(mask2.sum()), score=0.40, class_id=1, class_name='11', is_restoration=False,
+    )
+
+    result = resolve_dental_arch([det1, det2], (H, W))
+    assert result.duplicate_conflicts_resolved == 1
+    assigned_11 = [t for t in result.teeth if t.fdi_number == '11']
+    assert len(assigned_11) == 1
+    assert assigned_11[0].status == 'UNCERTAIN', (
+        f"Low-confidence duplicate winner should be UNCERTAIN, got {assigned_11[0].status}"
+    )
+    assert assigned_11[0].confidence == 0.45
+    # Conflicting candidate is unassigned
+    assert len(result.unassigned) == 1
+    assert result.unassigned[0].status == 'UNCERTAIN'
+    assert result.unassigned[0].fdi_number is None

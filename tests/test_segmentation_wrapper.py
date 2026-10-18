@@ -1,8 +1,11 @@
 import numpy as np
+import os
 import pytest
+import tempfile
 import torch
 
 from modules.segmentation.config import (
+    DEFAULT_CHECKPOINT_PATH,
     MODEL_CLASSES,
     NUM_CLASSES,
     RESTORATION_CLASSES,
@@ -10,6 +13,7 @@ from modules.segmentation.config import (
 )
 from modules.segmentation.model import (
     build_maskrcnn_model,
+    load_segmentation_model,
     run_segmentation_inference,
 )
 from modules.segmentation.visualization import create_segmentation_overlay
@@ -114,3 +118,114 @@ def test_visualization_overlay():
     assert not np.array_equal(overlay[125, 225], img_rgb[125, 225])
     # Pixel far outside mask should remain unchanged
     assert np.array_equal(overlay[10, 10], img_rgb[10, 10])
+
+
+# ── Checkpoint loading tests ─────────────────────────────────────────────────
+
+
+from pathlib import Path
+
+
+def test_default_checkpoint_path_does_not_exist():
+    """Document the current state: no trained checkpoint is shipped with the repo.
+
+    The .gitignore excludes *.pth/*.pt, and no checkpoint artifact is tracked in
+    git. This test verifies the default path is absent so the unavailable-state
+    behavior is exercised by default.
+    """
+    assert not DEFAULT_CHECKPOINT_PATH.exists(), (
+        f"Unexpected: default checkpoint exists at {DEFAULT_CHECKPOINT_PATH}\n"
+        "A shipped checkpoint would change the unavailable-state behavior.\n"
+    )
+
+
+def test_missing_checkpoint_raises_file_not_found():
+    """Regression: load_segmentation_model() must raise FileNotFoundError
+    (not a silent failure or random-weight substitution) when the checkpoint
+    path does not exist.
+    """
+    nonexistent = Path(tempfile.gettempdir()) / "nonexistent_dental_checkpoint.pth"
+    assert not nonexistent.exists()
+
+    with pytest.raises(FileNotFoundError, match="not found"):
+        load_segmentation_model(checkpoint_path=str(nonexistent))
+
+
+def test_incompatible_checkpoint_raises_runtime_error():
+    """Regression: an incompatible state dict (wrong class count / keys) must
+    raise RuntimeError, not produce silent garbage output.
+    """
+    model = build_maskrcnn_model(num_classes=36)
+    model.eval()
+
+    # Create a state dict with wrong-shaped weights (e.g. 10 classes instead of 36)
+    wrong_state_dict = {
+        k.replace("roi_heads.box_predictor.cls_score.", "")
+        if "roi_heads.box_predictor.cls_score" in k else k: v
+        for k, v in model.state_dict().items()
+    }
+    # Overwrite the classifier weight to a wrong shape to force a mismatch
+    wrong_state_dict["roi_heads.box_predictor.cls_score.weight"] = torch.zeros(
+        10, model.roi_heads.box_predictor.cls_score.weight.shape[1]
+    )
+
+    with tempfile.NamedTemporaryFile(suffix=".pth", delete=False) as f:
+        tmp_path = f.name
+        torch.save(wrong_state_dict, tmp_path)
+
+    try:
+        with pytest.raises(RuntimeError, match="Failed to load checkpoint"):
+            load_segmentation_model(checkpoint_path=tmp_path)
+    finally:
+        os.unlink(tmp_path)
+
+
+def test_checkpoint_env_var_override(monkeypatch):
+    """Regression: DENTAL_SEG_WEIGHTS env var overrides the default path.
+
+    Uses a nonexistent path to verify the override is honored (FileNotFoundError
+    references the env var path, not the default).
+    """
+    fake_path = "/tmp/nonexistent_dental_weights_override.pth"
+    monkeypatch.setenv("DENTAL_SEG_WEIGHTS", fake_path)
+
+    # Clear the cached model so the new path is used
+    import modules.segmentation.model as model_module
+    model_module._LOADED_MODEL = None
+    model_module._LOADED_PATH = None
+
+    try:
+        with pytest.raises(FileNotFoundError, match=fake_path):
+            load_segmentation_model()
+    finally:
+        monkeypatch.delenv("DENTAL_SEG_WEIGHTS", raising=False)
+        model_module._LOADED_MODEL = None
+        model_module._LOADED_PATH = None
+
+
+def test_successful_load_with_valid_untrained_checkpoint():
+    """Regression: a structurally valid but untrained checkpoint loads successfully.
+
+    This verifies that load_segmentation_model() can load a state dict that
+    matches the architecture, even though the weights are untrained (random).
+    It does NOT imply segmentation accuracy — only that the loading path works.
+    """
+    model = build_maskrcnn_model(num_classes=36)
+    model.eval()
+
+    with tempfile.NamedTemporaryFile(suffix=".pth", delete=False) as f:
+        tmp_path = f.name
+        torch.save(model.state_dict(), tmp_path)
+
+    try:
+        loaded_model, device = load_segmentation_model(checkpoint_path=tmp_path)
+        assert loaded_model is not None
+        assert isinstance(loaded_model, torch.nn.Module)
+        assert device.type == "cpu"
+    finally:
+        os.unlink(tmp_path)
+        # Clear cache
+        import modules.segmentation.model as model_module
+        model_module._LOADED_MODEL = None
+        model_module._LOADED_PATH = None
+        model_module._LOADED_DEVICE = None

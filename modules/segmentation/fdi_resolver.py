@@ -22,9 +22,12 @@ from typing import Dict, List, Optional, Set, Tuple
 import numpy as np
 
 from modules.segmentation.config import (
+    CONFIRMED_THRESHOLD,
     FDI_QUADRANT,
+    MIN_MODEL_CONFIDENCE,
     MODEL_CLASSES,
     QUADRANT_FULL_NAMES,
+    REVIEW_THRESHOLD,
     RESTORATION_CLASSES,
     get_anatomical_name,
 )
@@ -164,21 +167,40 @@ def resolve_dental_arch(
             det = group[0]
             cx, cy = det.centroid
             expected_quadrant = FDI_QUADRANT.get(fdi_code, "XX")
+            model_confidence = det.score
 
-            # Check quadrant spatial plausibility
-            quadrant_plausible, quad_note = _verify_quadrant_plausibility(
+            # Check quadrant spatial plausibility (anatomical validation)
+            anatomically_valid, quad_note = _verify_quadrant_plausibility(
                 expected_quadrant, cx, cy, midline_x, midline_y
             )
 
-            status = "CONFIRMED" if quadrant_plausible else "UNCERTAIN"
-            note = "Anatomically verified" if quadrant_plausible else quad_note
+            # Status depends on BOTH model confidence AND anatomical validity.
+            # Assigning an FDI number does NOT automatically make a tooth CONFIRMED.
+            if model_confidence >= CONFIRMED_THRESHOLD and anatomically_valid:
+                status = "CONFIRMED"
+                note = "High model confidence and anatomically consistent placement"
+            elif anatomically_valid:
+                status = "UNCERTAIN"
+                note = (
+                    f"Model confidence {model_confidence:.2f} below confirmed "
+                    f"threshold ({CONFIRMED_THRESHOLD:.2f}); anatomical placement "
+                    "consistent — professional review recommended"
+                )
+            else:
+                status = "UNCERTAIN"
+                note = (
+                    f"Model confidence {model_confidence:.2f}; {quad_note} "
+                    "— professional review recommended"
+                )
 
+            # FDI number assigned when anatomically plausible, but status
+            # reflects whether confidence is sufficient for confirmation.
             resolved_teeth.append(
                 ResolvedTooth(
                     instance_id=instance_counter,
-                    fdi_number=fdi_code if quadrant_plausible else None,
+                    fdi_number=fdi_code if anatomically_valid else None,
                     anatomical_name=get_anatomical_name(fdi_code),
-                    quadrant=expected_quadrant if quadrant_plausible else "UNASSIGNED",
+                    quadrant=expected_quadrant if anatomically_valid else "UNASSIGNED",
                     is_restoration=False,
                     restoration_type=None,
                     confidence=det.score,
@@ -200,29 +222,52 @@ def resolve_dental_arch(
             winner = group[0]
             conflicts = group[1:]
 
-            # Assign winner
+            # Assign winner — status depends on BOTH model confidence and anatomy
             cx, cy = winner.centroid
             expected_quad = FDI_QUADRANT.get(fdi_code, "XX")
-            plausible, quad_note = _verify_quadrant_plausibility(expected_quad, cx, cy, midline_x, midline_y)
+            winner_confidence = winner.score
+            anatomically_valid, quad_note = _verify_quadrant_plausibility(
+                expected_quad, cx, cy, midline_x, midline_y
+            )
+
+            if winner_confidence >= CONFIRMED_THRESHOLD and anatomically_valid:
+                winner_status = "CONFIRMED"
+                winner_note = (
+                    f"Resolved duplicate conflict ({len(group)} proposals): "
+                    f"retained highest confidence ({winner_confidence:.2f}); "
+                    "anatomically consistent"
+                )
+            elif anatomically_valid:
+                winner_status = "UNCERTAIN"
+                winner_note = (
+                    f"Resolved duplicate conflict ({len(group)} proposals): "
+                    f"retained highest confidence ({winner_confidence:.2f}); "
+                    f"below confirmed threshold ({CONFIRMED_THRESHOLD:.2f}) — "
+                    "professional review recommended"
+                )
+            else:
+                winner_status = "UNCERTAIN"
+                winner_note = (
+                    f"Resolved duplicate conflict ({len(group)} proposals): "
+                    f"retained highest confidence ({winner_confidence:.2f}); "
+                    f"{quad_note} — professional review recommended"
+                )
 
             resolved_teeth.append(
                 ResolvedTooth(
                     instance_id=instance_counter,
-                    fdi_number=fdi_code if plausible else None,
+                    fdi_number=fdi_code if anatomically_valid else None,
                     anatomical_name=get_anatomical_name(fdi_code),
-                    quadrant=expected_quad if plausible else "UNASSIGNED",
+                    quadrant=expected_quad if anatomically_valid else "UNASSIGNED",
                     is_restoration=False,
                     restoration_type=None,
-                    confidence=winner.score,
+                    confidence=winner_confidence,
                     mask=winner.mask,
                     bbox=winner.bbox,
                     centroid=winner.centroid,
                     area=winner.area,
-                    status="CONFIRMED" if plausible else "UNCERTAIN",
-                    status_note=(
-                        f"Resolved duplicate conflict ({len(group)} proposals): "
-                        f"retained highest confidence ({winner.score:.2f})"
-                    ),
+                    status=winner_status,
+                    status_note=winner_note,
                 )
             )
             instance_counter += 1

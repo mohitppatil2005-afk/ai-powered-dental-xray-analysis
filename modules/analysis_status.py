@@ -11,7 +11,7 @@ ANALYSIS_MODULES = {
     "Tooth segmentation & FDI numbering": {
         "configured": True,
         "description": "Instance segmentation (Mask R-CNN ResNet-50) with Anatomical FDI Resolver.",
-        "validation_status": "Validated on AKUDENTAL held-out set (88.0% F1, 83.6% mean IoU).",
+        "validation_status": "Research prototype — validation metrics pending independent review.",
     },
     "Dental caries": {
         "configured": False,
