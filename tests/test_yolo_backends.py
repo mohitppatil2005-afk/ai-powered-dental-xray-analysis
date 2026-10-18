@@ -23,6 +23,7 @@ from modules.segmentation.backend import (
 )
 from modules.segmentation.yolo_adapter import (
     download_yolo_weights,
+    resolve_yolo_inference_device,
     yolo_weights_info,
 )
 from modules.pathology import registry as pathology_registry
@@ -174,6 +175,40 @@ def test_download_yolo_weights_idempotent(tmp_path, _clear_backend_env):
     result = download_yolo_weights(dest_path=existing, force=False)
     assert result == existing
     assert existing.read_bytes() == b"already-here"
+
+
+# ---------------------------------------------------------------------------
+# Inference-device provenance
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_yolo_inference_device_prefers_model_device():
+    class _CudaLike:
+        def __str__(self):
+            return "cuda:0"
+
+    class _CpuLike:
+        def __str__(self):
+            return "cpu"
+
+    class _FakeModel:
+        def __init__(self, device):
+            self.device = device
+
+    # A model that really sits on CUDA must be reported as CUDA.
+    assert resolve_yolo_inference_device(_FakeModel(_CudaLike())) == "cuda:0"
+    # A model on CPU must be reported as CPU.
+    assert resolve_yolo_inference_device(_FakeModel(_CpuLike())) == "cpu"
+
+
+def test_resolve_yolo_inference_device_never_claims_gpu_on_cpu_host():
+    # No model device info and no usable CUDA on this host -> "cpu".
+    assert resolve_yolo_inference_device(None) == "cpu"
+
+    class _NoDevice:
+        pass
+
+    assert resolve_yolo_inference_device(_NoDevice()) == "cpu"
 
 
 def test_yolo_weights_info_shape(_clear_backend_env):

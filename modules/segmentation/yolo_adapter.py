@@ -40,6 +40,33 @@ _YOLO_MODEL = None
 _YOLO_PATH: Optional[str] = None
 
 
+def resolve_yolo_inference_device(model=None) -> str:
+    """Report the device the YOLO model actually runs inference on.
+
+    Prefers the loaded model's own ``device`` attribute (the Ultralytics
+    runtime moves the model to CUDA when available); falls back to a local
+    ``torch.cuda.is_available()`` probe. Never claims GPU use unless the
+    actual inference device is a GPU. Imported lazily so this module stays
+    importable without heavy dependencies.
+    """
+    try:
+        device = getattr(model, "device", None)
+        if device is not None:
+            device_str = str(device).lower()
+            if device_str.startswith("cuda") or device_str == "cpu":
+                return device_str
+    except Exception:
+        pass
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return "cuda"
+    except Exception:
+        pass
+    return "cpu"
+
+
 def resolve_yolo_weights_path(explicit_path: Optional[Union[str, Path]] = None) -> Path:
     """Resolve the YOLO weights path; the env var is re-read on each call."""
     if explicit_path is not None:
@@ -264,7 +291,7 @@ def run_yolo_inference(
         detections=detections,
         image_shape=(H, W),
         inference_time=inference_duration,
-        device_used="cpu/gpu (ultralytics auto)",
+        device_used=resolve_yolo_inference_device(model),
         checkpoint_loaded=_YOLO_PATH or str(resolve_yolo_weights_path()),
     )
 

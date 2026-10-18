@@ -12,6 +12,21 @@ from modules.pathology.registry import (
     evaluate_condition,
     register_pathology_detector,
 )
+from modules.pathology import registry as _pathology_registry
+
+
+@pytest.fixture(autouse=True)
+def _isolated_detector_registry():
+    """Keep pathology tests hermetic: other test modules (integration,
+    YOLO backends) register real detectors in the global registry, so
+    snapshot and restore it around every test here."""
+    snapshot = dict(_pathology_registry._DETECTOR_REGISTRY)
+    _pathology_registry._DETECTOR_REGISTRY.clear()
+    try:
+        yield
+    finally:
+        _pathology_registry._DETECTOR_REGISTRY.clear()
+        _pathology_registry._DETECTOR_REGISTRY.update(snapshot)
 
 
 def test_registered_pathologies_count():
